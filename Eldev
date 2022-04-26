@@ -4,4 +4,7 @@
 ;(eldev-use-package-archive 'gnu)
 (eldev-use-package-archive 'melpa)
 
+(add-to-list 'load-path "~/scripts/elisp/sorted-list/")
+(eldev-use-local-dependency "~/scripts/elisp/sorted-list/")
+
 (eldev-use-plugin 'autoloads)
