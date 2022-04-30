@@ -47,15 +47,21 @@
 ;; ********************************************************************************
 ;; FUNCTIONS - UTILITIES
 (defsubst idf-ht-inc (ht key)
+  "Increment the number associated as value in HT with KEY."
   (ht-set ht key (1+ (ht-get ht key 0))))
 
 (defsubst idf-ht-dec (ht key &optional allow-negative)
+  "Descrement the number associated as value in HT with KEY.
+
+If ALLOW-NEGATIVE is non-nil, then do not allow negative values
+by not decreasing counts that are 0."
   (ht-set ht key
           (if allow-negative
               (1- (ht-get ht key 0))
             (max (1- (ht-get ht key 0)) 0))))
 
 (defsubst idf-ht-add (ht key number)
+  "Add NUMBER to the value associated by hashtable HT with KEY."
   (ht-set ht key (+ number (ht-get ht key 0))))
 
 ;; ********************************************************************************
@@ -99,8 +105,8 @@ delete) to compute the delta for DATASET's result.")
 (cl-defstruct (idf-delta
                (:constructor idf-delta-create))
   "Represents updates to a dataframe as a set of inserted and a set of deleted row."
-  (inserted nil :type (list plist))
-  (deleted nil :type (list plist)))
+  (inserted nil :type list)
+  (deleted nil :type list))
 
 (defmacro with-delta (delta &rest body)
   "Given DELTA execute BODY making inserted and deleted tuples available.
@@ -255,24 +261,40 @@ deleted tuples available as `del'."
   (agg-functions nil :type (alist) :documentation "Aggregation functions as alist (agg-fn-symbol attributename)")
   (delta-results nil :type hashtable :documentation "Store aggregation function results for each group to for incremental maintenance."))
 
+(defun idf--agg-create-schema (groups aggs)
+  "Create the schema of an aggregation result from the GROUPS and aggregation functions AGGS."
+  (append
+   groups
+   (--map (intern (concat ":"
+                          (symbol-name (car it))
+                          "-"
+                          (substring (symbol-name (cadr it)) 1)))
+          aggs)))
+
 (cl-defmethod idf-collect ((df idf-op-aggregate))
   "Do hash aggregation to collect results."
-  (let ((groups (idf-op-aggregate-group-bys df))
+  (let* ((groups (idf-op-aggregate-group-bys df))
         (aggs (idf-op-aggregate-agg-functions df))
-        (inputs (idf-collect (car (idf-op-aggregate-inputs df)))))
+        (inputs (idf-collect (car (idf-op-aggregate-inputs df))))
+        (schema (or (idf-op-aggregate-schema df)
+                    (idf--agg-create-schema groups aggs))))
     (if groups
         ;; group-by
         (let ((aggresults (ht-create)))
           (dolist (r inputs)
             (idf--update-group groups aggs aggresults r))
           (ht-map (lambda (k v)
-                    (append k v))
+                    (idf--merge-schema-and-values schema (append k v)))
                   aggresults))
       ;; no group-by
       (let ((aggresults (idf--init-agg-results aggs)))
         (dolist (r inputs)
           (setq aggresults (idf--update-aggs aggresults aggs r)))
-        (list aggresults)))))
+        (idf--merge-schema-and-values schema (list aggresults))))))
+
+(defun idf--merge-schema-and-values (schema values)
+  "Merge list of attributes SCHEMA with list of VALUES into a tuple plist."
+  (-reduce 'append (-zip-lists schema values)))
 
 (cl-defmethod idf-prepare-for-maintenance ((df idf-op-aggregate))
   (dolist (i (idf--df-inputs df))
@@ -496,12 +518,13 @@ deleted tuples available as `del'."
 (cl-defmethod idf-prepare-for-maintenance ((df idf-mv))
   (dolist (i (idf--ds-inputs df))
     (idf-prepare-for-maintenance i))
-  (setf (idf--ds-setup-for-ivm df) t)
-  (pcase (idf-mv-mvtype df)
-    ('hashtable nil) ;;TODO implement
-    ('sortedlist
-     (setf (idf--df-result df)
-        (sorted-list-create nil (idf-mv-cmpfn df))))))
+  (unless (idf--ds-setup-for-ivm df)
+    (setf (idf--ds-setup-for-ivm df) t)
+    (pcase (idf-mv-mvtype df)
+      ('hashtable nil) ;;TODO implement
+      ('sortedlist
+       (setf (idf--df-result df)
+             (sorted-list-create nil (idf-mv-cmpfn df)))))))
 
 (cl-defmethod idf-materialize ((df idf-mv))
   (unless (idf--ds-setup-for-ivm df)
@@ -541,6 +564,18 @@ deleted tuples available as `del'."
     (pcase (idf-mv-mvtype mv)
       ('sortedlist (sorted-list-list r))
       ('hashtable r))))
+
+;; ********************************************************************************
+;; FUNCTIONS - UTILITY
+(defun idf-plistp (l)
+  "Test whether L may be a plist."
+  (if (not (and (listp l) (equal (mod (length l) 2) 0)))
+      nil
+    (if (cl-loop for (key value) on l by #'cddr
+                   when (not (symbolp key))
+                   return t)
+        nil
+      t)))
 
 ;; ********************************************************************************
 ;; FUNCTIONS - INCREMENTAL MAINTENANCE
@@ -595,7 +630,7 @@ sources (`idf-source-fn') , we will call
 
 ;; ********************************************************************************
 ;; FUNCTIONS - DATAFRAME OPERATIONS
-(defun idf-map (df mapfn &keys resultschema type)
+(cl-defun idf-map (df mapfn &key resultschema type)
   "Create dataframe that maps MAPFN to input DF.
 
 If RESULTSCHEMA is provided, then use it as the schema for the
@@ -630,7 +665,8 @@ these columns and apply the reducer to every group."
        :name name
        :content content
        :schema (or schema
-                   (-slice (car content) 0 nil 2)))
+                   (when (idf-plistp (car content))
+                       (-slice (car content) 0 nil 2))))
     (idf-source-fn-create
      :name name
      :schema schema
@@ -683,13 +719,11 @@ equality for duplicate elimination."
    :inputs `(,df)
    :keyfn keyextractor))
 
-(cl-defun idf-aggregate (df &key group-by aggs)
+(cl-defun idf-aggregate (df &key group-by aggs schema)
   "Group DF on GROUP-BY attributes and then compute aggregation functions AGGS for each group."
   (idf--op-aggregate-create
    :type 'plist
-   :schema (append
-            group-by
-            (-map 'cadr aggs))
+   :schema (or schema (idf--agg-create-schema group-by aggs))
    :group-bys group-by
    :agg-functions aggs
    :inputs `(,df)))
