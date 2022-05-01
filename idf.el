@@ -290,7 +290,7 @@ deleted tuples available as `del'."
       (let ((aggresults (idf--init-agg-results aggs)))
         (dolist (r inputs)
           (setq aggresults (idf--update-aggs aggresults aggs r)))
-        (idf--merge-schema-and-values schema (list aggresults))))))
+        (list (idf--merge-schema-and-values schema aggresults))))))
 
 (defun idf--merge-schema-and-values (schema values)
   "Merge list of attributes SCHEMA with list of VALUES into a tuple plist."
@@ -299,20 +299,28 @@ deleted tuples available as `del'."
 (cl-defmethod idf-prepare-for-maintenance ((df idf-op-aggregate))
   (dolist (i (idf--df-inputs df))
     (idf-prepare-for-maintenance i))
-  (if (idf-op-aggregate-group-bys df)
+  (setf (idf--df-setup-for-ivm df) t)
+  (let ((inputresult (idf-collect (car (idf--df-inputs df)))))
+    (if (idf-op-aggregate-group-bys df)
+        (setf (idf-op-aggregate-delta-results df)
+              (ht-create 'equal))
       (setf (idf-op-aggregate-delta-results df)
-            (ht-create))
-    (setf (idf-op-aggregate-delta-results df)
-          (idf--init-agg-results (idf-op-aggregate-agg-functions df))))
-  (setf (idf--df-setup-for-ivm df) t))
+            (idf--init-agg-results (idf-op-aggregate-agg-functions df))))
+    (idf-apply-delta df (list (idf-delta-create :inserted inputresult)))))
 
 (cl-defmethod idf-materialize ((df idf-op-aggregate))
+  (unless (idf--df-setup-for-ivm df)
+    (idf-prepare-for-maintenance df))
   (setf (idf--df-result df) (idf-collect df)))
 
 (cl-defmethod idf-apply-delta ((df idf-op-aggregate) (inputdelta list))
+  (unless (idf--df-setup-for-ivm df)
+    (idf-prepare-for-maintenance df))
   (with-delta (car inputdelta)
-    (let ((groups (idf-op-aggregate-group-bys df))
+    (let* ((groups (idf-op-aggregate-group-bys df))
           (aggs (idf-op-aggregate-agg-functions df))
+          (schema (or (idf-op-aggregate-schema df)
+                      (idf--agg-create-schema groups aggs)))
           (ht (idf-op-aggregate-delta-results df)))
       (if groups
           ;; group-by, update aggregation results keeping track of old versions of updated groups
@@ -325,11 +333,11 @@ deleted tuples available as `del'."
             (idf-delta-create
              :inserted
              (ht-map (lambda (k v)
-                       (append k v))
+                       (idf--merge-schema-and-values schema (append k v)))
                      newgroupvalues)
              :deleted
              (ht-map (lambda (k v)
-                       (append k v))
+                       (idf--merge-schema-and-values schema (append k v)))
                      oldgroupvalues)))
         ;; no group-by
         (let* ((oldagg (idf-op-aggregate-delta-results df))
@@ -340,8 +348,8 @@ deleted tuples available as `del'."
             (setq newagg (idf--del-update-agg newagg aggs r)))
           (setf (idf-op-aggregate-delta-results df) newagg)
           (idf-delta-create
-           :inserted newagg
-           :deleted oldagg))))))
+           :inserted (list (idf--merge-schema-and-values schema newagg))
+           :deleted (list (idf--merge-schema-and-values schema oldagg))))))))
 
 (defun idf--update-aggs (cur aggs tuple)
   "Update aggregation function state CUR for AGGS with values from TUPLE."
@@ -511,7 +519,6 @@ deleted tuples available as `del'."
   (cmpfn nil :type function :documentation "When storing as a sorted lists, then use this function as the small-then  function.")
   (store-as-symbol nil :type symbol :documentation "Store mv as this symbol."))
 
-
 (cl-defmethod idf-collect ((df idf-mv))
 (idf-collect (car (idf--df-inputs df))))
 
@@ -621,6 +628,37 @@ sources (`idf-source-fn') , we will call
      (t
       (let ((input-updates (--map (idf-maintain it updates) (idf--df-inputs df))))
         (idf-apply-delta df input-updates)))))
+
+(defun idf-maintain-multiple (dfs updates &optional delta-cache)
+  "Given list of dataframes DFS, apply UPDATES.
+
+WE incrementally maintain the results for all these dataframes.
+Importantly, operators in the dataflow graphs may be shared
+across the dataframes and we take care to only update the result
+of each operator once."
+  (unless delta-cache
+    (setq delta-cache (ht-create 'equal)))
+  (dolist (df dfs)
+    (unless (idf--df-setup-for-ivm df)
+      (idf-prepare-for-maintenance df))
+    ;; maintain inputs
+    (--each (idf--df-inputs df)
+      (idf-maintain-multiple (list it) updates delta-cache))
+    (unless (ht-get delta-cache df)
+      (puthash df
+               (cond
+                ;; for literal sources apply update (if it exists)
+                ((idf-source-literal-p df)
+                 (let* ((name (idf--source-name df)))
+                   (or (plist-get updates name) (idf--empty-delta))))
+                ;; for function sources call the update function
+                ((idf-source-fn-p df)
+                 (funcall (idf-source-fn-update-fn df)))
+                ;; operator
+                (t
+                 (let ((input-updates (--map (ht-get delta-cache it) (idf--df-inputs df))))
+                   (idf-apply-delta df input-updates))))
+               delta-cache))))
 
 (defun idf--empty-delta ()
   "Create an emply `idf-delta'."
