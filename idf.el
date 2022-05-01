@@ -250,8 +250,97 @@ deleted tuples available as `del'."
   (init-val nil :type plist :documentation "The initial value for the reducer function")
   (reduce-fn 'concat :type function :documentation "The reducer function")
   (group-fn nil :type (list symbol) :documentation "Group input on the result of this function and apply reduce to each group.")
-  (reduce-result nil :type plist :documentation "Store for each group the reduce result.")
-  (reduce-inputs nil :type list :documentation "Store inputs for reduce to deal with deletes."))
+  (reduce-results nil :type hashtable :documentation "Store for each group the reduce result.")
+  (reduce-inputs nil :type hashtable :documentation "Store inputs each group for reduce to deal with deletes."))
+
+(defun idf-ht-value-list-append (ht key value)
+  "Append VALUE to the list stored at KEY in hashtable HT."
+  (if (ht-contains-p ht key)
+      (ht-set ht key (cons value (ht-get ht key)))
+    (ht-set ht key (list value))))
+
+(defun idf-ht-value-list-delete (ht key value)
+  "Delete VALUE from the list stored at KEY in hashtable HT."
+  (let ((newl (cl-remove value (ht-get ht key))))
+    (if newl
+        (ht-set ht key newl)
+      (ht-remove ht key))))
+
+(cl-defmethod idf-collect ((df idf-op-reduce))
+  "Build hashtable with groups and lists of values, then apply reduce function to each list and return the result of DF."
+  (let* ((grpfn (or (idf-op-reduce-group-fn df) (lambda (x) t)))
+         (input (car (idf--df-inputs df)))
+         (reduce (idf-op-reduce-reduce-fn df))
+         (init-val (idf-op-reduce-init-val df))
+         (ht (ht-create 'equal)))
+    (--each (idf-collect input)
+      (idf-ht-value-list-append ht (funcall grpfn it) it))
+    (dolist (k (ht-keys ht))
+      (let ((l (ht-get ht k)))
+        (ht-set ht k (-reduce-from reduce init-val l))))
+    (ht-values ht)))
+
+(cl-defmethod idf-prepare-for-maintenance ((df idf-op-reduce))
+  (dolist (i (idf--df-inputs df))
+    (idf-prepare-for-maintenance i))
+  (setf (idf--df-setup-for-ivm df) t)
+  (let* ((grpfn (or (idf-op-reduce-group-fn df) (lambda (x) t)))
+         (input (car (idf--df-inputs df)))
+         (inputdata (idf-collect input))
+         (reduce (idf-op-reduce-reduce-fn df))
+         (init-val (idf-op-reduce-init-val df))
+         (htinputs (ht-create 'equal))
+         (htresults (ht-create 'equal)))
+    (setf (idf-op-reduce-reduce-inputs df)
+          htinputs)
+    (setf (idf-op-reduce-reduce-results df)
+          htresults)
+    (--each inputdata
+      (idf-ht-value-list-append htinputs (funcall grpfn it) it))
+    (cl-loop for (k . l) in (ht->alist htinputs)
+             do
+        (ht-set htresults k (-reduce-from reduce init-val l)))))
+
+(cl-defmethod idf-materialize ((df idf-op-reduce))
+  (unless (idf--df-setup-for-ivm df)
+    (idf-prepare-for-maintenance df))
+  (setf (idf--df-result df) (idf-collect df)))
+
+(cl-defmethod idf-apply-delta ((df idf-op-reduce) (deltas list))
+  (unless (idf--df-setup-for-ivm df)
+    (idf-prepare-for-maintenance df))
+  (let ((htinputs (idf-op-reduce-reduce-inputs df))
+        (htresults (idf-op-reduce-reduce-results df))
+        (grpfn (or (idf-op-reduce-group-fn df) (lambda (x) t)))
+        (reduce (idf-op-reduce-reduce-fn df))
+        (init-val (idf-op-reduce-init-val df))
+        (prevvalues (ht-create 'equal)))
+    (with-delta (car deltas)
+      ;; delete and insert into group inputs
+      (dolist (d del)
+        (let ((key (funcall grpfn d)))
+          (unless (ht-contains-p prevvalues key)
+            (ht-set prevvalues key (ht-get htresults key)))
+          (idf-ht-value-list-delete htinputs key d)))
+      (dolist (i ins)
+        (let ((key (funcall grpfn i)))
+          (unless (ht-contains-p prevvalues key)
+            (ht-set prevvalues key (ht-get htresults key)))
+          (idf-ht-value-list-append htinputs key i)))
+      ;; compute new results
+      (dolist (k (ht-keys prevvalues))
+        (ht-set htresults k (-reduce-from reduce init-val (ht-get htinputs k))))
+      ;; create delta
+      (idf-delta-create
+       :deleted (->>
+                 (ht->alist prevvalues)
+                 (-map 'cdr)
+                 (--filter it))
+       :inserted (->>
+                  (ht-keys prevvalues)
+                  (--map (cons it (ht-get htinputs it)))
+                  (-map 'cdr)
+                  (--filter it))))))
 
 ;; AGGREGATION
 (cl-defstruct (idf-op-aggregate
@@ -488,7 +577,7 @@ deleted tuples available as `del'."
     (dolist (r results)
       (idf-ht-inc ht (funcall keyfn r)))))
 
-(cl-defmethod idf-apply-delta ((_ idf-op-unique) (delta list))
+(cl-defmethod idf-apply-delta ((df idf-op-unique) (delta list))
   (with-delta
    (car delta)
    (let* ((keyfn (idf-op-unique-keyfn df))
@@ -710,7 +799,7 @@ of result. Otherwise, keep schema undecided (nil)."
      :inputs `(,df)
      :map-fn mapfn)))
 
-(cl-defun idf-reduce (df &key reducefn initval resultschema group-by)
+(cl-defun idf-reduce (df &key reducefn groupfn groupattrs initval type resultschema)
   "Create dataframe DF that applies REDUCEFN to merge input into a single row.
 
 If INITVAL is non-nil, then initialize the result to INITVAL. If
@@ -719,7 +808,9 @@ GROUP-BY is non-nil, then group the rows of the dataframe on
 these columns and apply the reducer to every group."
   (idf--op-reduce-create
    :reduce-fn reducefn
+   :group-fn (or groupfn (idf-create-extractor groupattrs))
    :init-val initval
+   :type (if resultschema 'plist (or type 'list))
    :schema resultschema
    :inputs `(,df)))
 
