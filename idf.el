@@ -516,8 +516,10 @@ deleted tuples available as `del'."
                (:include idf--df)
                (:constructor idf-mv--create))
   (mvtype 'hashtable :type symbol :documentation "What data structure is used to store the materialized view? `hashtable' or sorted `list'")
-  (cmpfn nil :type function :documentation "When storing as a sorted lists, then use this function as the small-then  function.")
-  (store-as-symbol nil :type symbol :documentation "Store mv as this symbol."))
+  (cmpfn nil :type symbol :documentation "When storing as a sorted lists, then use this function as the small-then function. For hashtables this is the hash test (created with `define-hash-table-test'")
+  (keyfn nil :type function :documentation "For hashtables use this function to extract a key from a tuple.")
+  (valuefn nil :type function :documentation "For hashtables use this function to extract the value from a tuple.")
+  (store-as-symbol nil :type symbol :documentation "Store mv as this symbol.")) ;;TODO not supported yet
 
 (cl-defmethod idf-collect ((df idf-mv))
 (idf-collect (car (idf--df-inputs df))))
@@ -528,7 +530,9 @@ deleted tuples available as `del'."
   (unless (idf--ds-setup-for-ivm df)
     (setf (idf--ds-setup-for-ivm df) t)
     (pcase (idf-mv-mvtype df)
-      ('hashtable nil) ;;TODO implement
+      ('hashtable
+       (setf (idf--df-result df)
+             (ht-create (idf-mv-cmpfn df))))
       ('sortedlist
        (setf (idf--df-result df)
              (sorted-list-create nil (idf-mv-cmpfn df)))))))
@@ -539,31 +543,51 @@ deleted tuples available as `del'."
   (let ((inputds (car (idf--ds-inputs df)))
         (storesym (idf-mv-store-as-symbol df)))
     (pcase (idf-mv-mvtype df)
-      ('hashtable nil) ;;TODO implement
+      ('hashtable
+       (let* ((input (idf-collect inputds))
+             (keyfn (idf-mv-keyfn df))
+             (valuefn (idf-mv-valuefn df))
+             (cmpfn (idf-mv-cmpfn df))
+             (ht (idf--df-result df)))
+         (dolist (i input)
+           (ht-set ht (funcall keyfn i) (funcall valuefn i)))))
       ('sortedlist
-       (progn
-         (let ((input (idf-collect inputds)))
-           (setf (idf--ds-result df)
-                 (sorted-list-create input (idf-mv-cmpfn df)))
-           (when storesym
-             (set storesym (sorted-list-list (idf--ds-result df))))))))))
+       (let ((input (idf-collect inputds)))
+         (setf (idf--ds-result df)
+               (sorted-list-create input (idf-mv-cmpfn df)))
+         (when storesym
+           (set storesym (sorted-list-list (idf--ds-result df)))))))))
 
 (cl-defmethod idf-apply-delta ((df idf-mv) (delta list))
   "Apply DELTA to materialized view IDF-MV and return DELTA."
   (pcase (idf-mv-mvtype df)
-    ('hashtable nil) ;;TODO implement
+    ('hashtable
+     (let ((ht (idf--df-result df))
+           (keyfn (idf-mv-keyfn df))
+           (valuefn (idf-mv-valuefn df)))
+       (with-delta (car delta)
+         (--each del (ht-remove ht (funcall keyfn it)))
+         (--each ins (ht-set ht (funcall keyfn it) (funcall valuefn it))))
+         (car delta))) ;;FIXME hashtable behaves all unique so adapt the delta
     ('sortedlist
      (let ((sl (idf--df-result df)))
-       (with-delta
-        (car delta)
-        (--each ins (sorted-list-insert sl it))
-        (--each del (sorted-list-delete sl it)))
+       (with-delta (car delta)
+         (--each del (sorted-list-delete sl it))
+         (--each ins (sorted-list-insert sl it)))
        (car delta)))))
 
 (defun idf-mv-create-smallerfn (sortkeys &optional types)
   "Create a function comparing two plists on SORTKEYS whether the first one is smaller than the second one."
   `(lambda (a b)
     (--all-p (< (plist-get a it) (plist-get b it)) ',sortkeys)))
+
+(defun idf-create-extractor (attrs)
+  "Create a function that projects tuples on ATTRS."
+  (if attrs
+      (if (> (length attrs) 1)
+          `(lambda (x) (--map (plist-get x it) ',attrs))
+        `(lambda (x) (plist-get x ',(car attrs))))
+    `(lambda (x) t)))
 
 (defun idf-mv-get-result (mv)
   "Get the materialized result of a materialized view."
@@ -586,13 +610,15 @@ deleted tuples available as `del'."
 
 ;; ********************************************************************************
 ;; FUNCTIONS - INCREMENTAL MAINTENANCE
-(cl-defun idf-materialize-as (df &key viewtype schema maintain-as-symbol comparefn sortkeys)
+(cl-defun idf-materialize-as (df &key viewtype schema maintain-as-symbol comparefn sortkeys keyfn keyattrs valuefn valueattrs)
   "Materialize DF as VIEWTYPE (`'hashtable' or `'sortedlist').
 
 Either COMPAREFN or SORTKEYS have to be specified to determine
 the sort order for `'sortedlist' views. Optionally, a SCHEMA for
 the result dataframe can be provided."
-  (let ((smallerfn (or comparefn (idf-mv-create-smallerfn sortkeys)))
+  (let ((smallerfn (or comparefn (when sortkeys (idf-mv-create-smallerfn sortkeys))))
+        (keyfn (or keyfn (when keyattrs (idf-create-extractor keyattrs))))
+        (valuefn (or valuefn (idf-create-extractor valueattrs)))
         (schema (or schema (when (idf--df-p df) (idf--df-schema df))))
         themv)
     (setq themv
@@ -602,7 +628,9 @@ the result dataframe can be provided."
            :schema schema
            :inputs `(,df)
            :store-as-symbol maintain-as-symbol
-           :cmpfn smallerfn))
+           :cmpfn smallerfn
+           :keyfn keyfn
+           :valuefn valuefn))
     (idf-materialize themv)
     themv))
 
