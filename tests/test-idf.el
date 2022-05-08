@@ -83,6 +83,25 @@
                (should (equal (idf-collect df)
                               expected))))))
 
+(ert-deftest test-idf-unique ()
+  "Test unique."
+  (let ((tasks `(;; reduce number list
+                 (1 1 1 2 2 3 3 3 4 3 2)
+                 nil
+                 (1 2 3 4)
+                 ;; unique on attribute a
+                 ((:a 1 :b 1) (:a 1 :b 10) (:a 2 :b 10))
+                 ,(lambda (p) (plist-get p :a))
+                 ((:a 1 :b 1) (:a 2 :b 10)))))
+    (cl-loop for (in keyfn expected) on tasks by #'cdddr
+             do
+             (let ((df (idf-unique
+                        (idf-create-source :content in)
+                        :keyextractor keyfn)))
+               (should (equal (idf-collect df)
+                               expected))))))
+
+
 (ert-deftest test-idf-materialization-sorted-list ()
   "Test materialization."
   (let* ((s (idf-create-source :name :r :content '((:a 10 :b 1) (:a 20 :b 2) (:a 30 :b 1))))
@@ -168,7 +187,6 @@
                     :deleted '((:x 60)))
                    (idf-maintain v d)))))
 
-
 (ert-deftest test-idf-maintain-groupby-aggregate ()
   (let* ((s (idf-create-source :name :r :content '((:a 10 :b 1 :c 10) (:a 20 :b 2 :c 5) (:a 30 :b 1 :c 5))))
          (v (-> s
@@ -204,9 +222,21 @@
     (idf-maintain-multiple `(,v1 ,v2) d)
 
     (should (equal (idf-mv-get-result v1)
-                   '((:c 10 :x 10)
-                     (:c 5 :x 55))))
+                   '((:c 5 :x 55)
+                     (:c 10 :x 10))))
 
     (should (equal (idf-mv-get-result v2)
                    '((:x 10)
                      (:x 55))))))
+
+(ert-deftest test-idf-materialize-as-symbol ()
+  (defvar ert-test-idf--mv nil)
+  (let* ((s (idf-create-source :name :r :content '((:a 10 :b 1) (:a 20 :b 2) (:a 30 :b 1))))
+         (v1 (-> s
+                 (idf-project :attrs '(:a))
+                 (idf-materialize-as :viewtype 'sortedlist
+                                     :sortkeys '(:a)
+                                     :maintain-as-symbol 'ert-test-idf--mv))))
+    (should (equal '((:a 10) (:a 20) (:a 30))
+                   ert-test-idf--mv)))
+  (unintern 'ert-test-idf--mv nil))

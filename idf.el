@@ -26,7 +26,7 @@
 ;;; Commentary:
 
 ;; An implementation of incremental and lazy dataflows in Emacs inspired by the
-;; likes of Spark (without the distribution).
+;; likes of Spark (without the distribution of course).
 
 ;;; Code:
 
@@ -88,25 +88,25 @@ delete) to compute the delta for DATASET's result.")
 
 ;; ********************************************************************************
 ;; DATA STRUCTURES - DATAFRAMES AND DELTAS
-(cl-defstruct (idf--ds
-               (:constructor idf--ds-create))
-  "Dataset: a dataflow graph whose result is lazily created."
-  (result nil :type (list plist) :documentation "Cached result for the dataframe.")
+(cl-defstruct (idf--df
+               (:constructor idf--df-create))
+  "Data frame: a dataflow graph whose result is lazily created."
+  (result nil :type list :documentation "Cached result for the dataframe.")
   (type nil :documentation "The type of objects stored in the dataset. Use nil if unknown.")
   (setup-for-ivm nil :type boolean :documentation "If true, then the dataframe is ready for incremental maintenance.")
-  inputs)
-
-(cl-defstruct (idf--df
-               (:include idf--ds (type 'plist))
-               (:constructor idf--df-create))
-  "Data frame (a dataflow graph whose result is lazily created."
-  (schema nil :type (list symbol) :documentation "Data frame's schema (list of symbols)"))
+  inputs
+  (schema nil :type (list symbol) :documentation "Data frame's schema (list of symbols). Only for dataframes of type plist"))
 
 (cl-defstruct (idf-delta
                (:constructor idf-delta-create))
   "Represents updates to a dataframe as a set of inserted and a set of deleted row."
   (inserted nil :type list)
   (deleted nil :type list))
+
+(defun idf-delta-size (delta)
+  "Return the number of deleted and inserted tuples for DELTA."
+  (+ (length (idf-delta-inserted delta))
+     (length (idf-delta-deleted delta))))
 
 (defmacro with-delta (delta &rest body)
   "Given DELTA execute BODY making inserted and deleted tuples available.
@@ -145,6 +145,7 @@ deleted tuples available as `del'."
 
 (cl-defmethod idf-apply-delta ((df idf-source-literal) (inputdelta idf-delta))
   "Just return the delta passed for this source."
+  (ignore df)
   inputdelta)
 
 ;; Source whose content and deltas are computed by calling functions
@@ -236,6 +237,7 @@ deleted tuples available as `del'."
     (setf (idf--df-setup-for-ivm df) t))
 
 (cl-defmethod idf-apply-delta ((df idf-op-union) (delta list))
+  (ignore df)
   (idf-delta-create
    :inserted (append (idf-delta-inserted (car delta))
                      (idf-delta-inserted (cadr delta)))
@@ -266,9 +268,18 @@ deleted tuples available as `del'."
         (ht-set ht key newl)
       (ht-remove ht key))))
 
+(defun idf-one-group-fn (x)
+  "Return t, used to group all inputs into one group.
+
+Ignores input X."
+  (ignore x)
+  t)
+
 (cl-defmethod idf-collect ((df idf-op-reduce))
-  "Build hashtable with groups and lists of values, then apply reduce function to each list and return the result of DF."
-  (let* ((grpfn (or (idf-op-reduce-group-fn df) (lambda (x) t)))
+  "Build hashtable with groups and lists of values.
+
+Then apply reduce function to each list and return the result of DF."
+  (let* ((grpfn (or (idf-op-reduce-group-fn df) #'idf-one-group-fn))
          (input (car (idf--df-inputs df)))
          (reduce (idf-op-reduce-reduce-fn df))
          (init-val (idf-op-reduce-init-val df))
@@ -284,7 +295,7 @@ deleted tuples available as `del'."
   (dolist (i (idf--df-inputs df))
     (idf-prepare-for-maintenance i))
   (setf (idf--df-setup-for-ivm df) t)
-  (let* ((grpfn (or (idf-op-reduce-group-fn df) (lambda (x) t)))
+  (let* ((grpfn (or (idf-op-reduce-group-fn df) #'idf-one-group-fn))
          (input (car (idf--df-inputs df)))
          (inputdata (idf-collect input))
          (reduce (idf-op-reduce-reduce-fn df))
@@ -311,7 +322,7 @@ deleted tuples available as `del'."
     (idf-prepare-for-maintenance df))
   (let ((htinputs (idf-op-reduce-reduce-inputs df))
         (htresults (idf-op-reduce-reduce-results df))
-        (grpfn (or (idf-op-reduce-group-fn df) (lambda (x) t)))
+        (grpfn (or (idf-op-reduce-group-fn df) #'idf-one-group-fn))
         (reduce (idf-op-reduce-reduce-fn df))
         (init-val (idf-op-reduce-init-val df))
         (prevvalues (ht-create 'equal)))
@@ -348,10 +359,13 @@ deleted tuples available as `del'."
                (:constructor idf--op-aggregate-create))
   (group-bys nil :type (list string) :documentation "Names of group-by attributes")
   (agg-functions nil :type (alist) :documentation "Aggregation functions as alist (agg-fn-symbol attributename)")
-  (delta-results nil :type hashtable :documentation "Store aggregation function results for each group to for incremental maintenance."))
+  (delta-results nil :type hashtable :documentation "Store aggregation  results for incremental maintenance."))
 
 (defun idf--agg-create-schema (groups aggs)
-  "Create the schema of an aggregation result from the GROUPS and aggregation functions AGGS."
+  "Create the schema of an aggregation result.
+
+The schema is the GROUPS followed by the aggregation function
+results for AGGS."
   (append
    groups
    (--map (intern (concat ":"
@@ -483,7 +497,10 @@ deleted tuples available as `del'."
             ('max (avl-tree-delete val newval)))))))
 
 (defun idf--maintain-ins-group (groups aggs ht oldgroupvalues newgroupvalues tuple)
-  "Maintain aggregtion result AGGS for GROUPS stored in hashtable HT by inserting TUPLE."
+  "Maintain aggregtion result AGGS for GROUPS.
+
+The results should be stored in hashtable HT. We update the
+results by inserting TUPLE."
   (let* ((groups (--map (plist-get tuple it) groups))
          (state (ht-get ht groups))
          newstate)
@@ -496,7 +513,10 @@ deleted tuples available as `del'."
     (ht-set newgroupvalues groups newstate)))
 
 (defun idf--maintain-del-group (groups aggs ht oldgroupvalues newgroupvalues tuple)
-  "Maintain aggregtion result AGGS for GROUPS stored in hashtable HT by deleting TUPLE."
+  "Maintain aggregtion result AGGS for GROUPS.
+
+The results are expceted to be stored in hashtable HT. We
+maintaint the result by deleting TUPLE."
   (let* ((groups (--map (plist-get tuple it) groups))
          (state (ht-get ht groups))
          newstate)
@@ -509,7 +529,10 @@ deleted tuples available as `del'."
     (ht-set newgroupvalues groups newstate)))
 
 (defun idf--update-group (groups aggs ht tuple)
-  "Update partial aggregation result for AGGS for GROUPS of TUPLE stored in hashtable HT."
+  "Update partial aggregation result of TUPLE for AGGS for GROUPS.
+
+The partial aggregation results are supposed to be stored in
+hashtable HT."
   (let* ((groups (--map (plist-get tuple it) groups))
          (state (ht-get ht groups)))
     (unless state
@@ -540,29 +563,25 @@ deleted tuples available as `del'."
                (:include idf--operator)
                (:constructor idf--op-unique-create))
   (delta-elements nil :type hashmap :documentation "Store for each tuple a count to be able to handle updates.")
-  (keyfn nil :type function :documentation "Use this function to extract keys from tuples."))
+  (keyfn 'identity :type function :documentation "Use this function to extract keys from tuples. By default this is `identity'."))
 
 (defun idf-cmp-fn-from-key-extractor (keyfn)
   "Create an equality function for a key extractor function."
-  `(lambda (a b) (equal (,keyfn a) (,keyfn b))))
+  (if (eq keyfn 'identify)
+      'equal
+      `(lambda (a b) (equal (,keyfn a) (,keyfn b)))))
 
 (cl-defmethod idf-collect ((df idf-op-unique))
   (let* ((keyfn (idf-op-unique-keyfn df))
          (cmpfn (idf-cmp-fn-from-key-extractor keyfn))
-        (in (car (idf-op-unique-inputs df))))
-    (if keyfn
-        (let ((-compare-fn cmpfn))
-          (-uniq (idf-collect in)))
-      (-uniq (idf-collect (car (idf-op-unique-inputs df)))))))
+         (in (car (idf-op-unique-inputs df))))
+    (let ((-compare-fn cmpfn))
+      (-uniq (idf-collect in)))))
 
 (cl-defmethod idf-prepare-for-maintenance ((df idf-op-unique))
   (dolist (i (idf--df-inputs df))
     (idf-prepare-for-maintenance i))
-  (let* ((keyfn (idf-op-unique-keyfn df))
-         (eqfn (if keyfn
-                   (idf-cmp-fn-from-key-extractor keyfn)
-                 'equal))
-         (ht (make-hash-table :test eqfn)))
+  (let* ((ht (ht-create 'equal)))
     (setf (idf--df-setup-for-ivm df) t)
     (setf (idf-op-unique-delta-elements df)
         ht)))
@@ -571,8 +590,8 @@ deleted tuples available as `del'."
   (unless (idf-op-unique-delta-elements df)
     (idf-prepare-for-maintenance df))
   (let* ((ht (idf-op-unique-delta-elements df))
-         (keyfn (or (idf-op-unique-keyfn df) 'identity))
-        (results (idf-collect df)))
+         (keyfn (idf-op-unique-keyfn df))
+         (results (idf-collect df)))
     (setf (idf--df-result df) results)
     (dolist (r results)
       (idf-ht-inc ht (funcall keyfn r)))))
@@ -581,19 +600,20 @@ deleted tuples available as `del'."
   (with-delta
    (car delta)
    (let* ((keyfn (idf-op-unique-keyfn df))
-          (eqfn (if keyfn
-                    (idf-cmp-fn-from-key-extractor keyfn)
-                  'equal))
-          (realdelta (make-hash-table))
+          (ht (idf-op-unique-delta-elements df))
+          (realdelta (ht-create 'equal))
           (outins nil)
           (outdel nil))
-     (--each ins (idf-ht-inc realdelta it))
-     (--each del (idf-ht-dec realdelta it t))
+     (--each ins (idf-ht-inc realdelta (funcall keyfn it)))
+     (--each del (idf-ht-dec realdelta (funcall keyfn it) t))
      (ht-amap
-      (cond ((> value 0)
-             (add-to-list outins (-repeat value key)))
-            ((< value 0)
-             (add-to-list outdel (-repeat value key))))
+      (let* ((oldvalue (ht-get ht key))
+             (newvalue (+ oldvalue value)))
+        (ht-set ht key newvalue)
+        (when (and (equal oldvalue 0) (> newvalue 0))
+          (add-to-list outins key))
+        (when (and (> oldvalue 1) (equal newvalue 0))
+             (add-to-list outdel key)))
       realdelta)
      (idf-delta-create
       :inserted outins
@@ -604,20 +624,25 @@ deleted tuples available as `del'."
 (cl-defstruct (idf-mv
                (:include idf--df)
                (:constructor idf-mv--create))
-  (mvtype 'hashtable :type symbol :documentation "What data structure is used to store the materialized view? `hashtable' or sorted `list'")
-  (cmpfn nil :type symbol :documentation "When storing as a sorted lists, then use this function as the small-then function. For hashtables this is the hash test (created with `define-hash-table-test'")
+  (mvtype 'hashtable :type symbol :documentation "Data structure to use to store the materialized view.
+
+Should be either `hashtable' or sorted `list'")
+  (cmpfn nil :type symbol :documentation "Use this function as the small-then function for sorted lists.
+
+For hashtables this is the hash test (created with
+`define-hash-table-test'")
   (keyfn nil :type function :documentation "For hashtables use this function to extract a key from a tuple.")
   (valuefn nil :type function :documentation "For hashtables use this function to extract the value from a tuple.")
-  (store-as-symbol nil :type symbol :documentation "Store mv as this symbol.")) ;;TODO not supported yet
+  (store-as-symbol nil :type symbol :documentation "Store mv as this symbol."))
 
 (cl-defmethod idf-collect ((df idf-mv))
 (idf-collect (car (idf--df-inputs df))))
 
 (cl-defmethod idf-prepare-for-maintenance ((df idf-mv))
-  (dolist (i (idf--ds-inputs df))
+  (dolist (i (idf--df-inputs df))
     (idf-prepare-for-maintenance i))
-  (unless (idf--ds-setup-for-ivm df)
-    (setf (idf--ds-setup-for-ivm df) t)
+  (unless (idf--df-setup-for-ivm df)
+    (setf (idf--df-setup-for-ivm df) t)
     (pcase (idf-mv-mvtype df)
       ('hashtable
        (setf (idf--df-result df)
@@ -627,46 +652,58 @@ deleted tuples available as `del'."
              (sorted-list-create nil (idf-mv-cmpfn df)))))))
 
 (cl-defmethod idf-materialize ((df idf-mv))
-  (unless (idf--ds-setup-for-ivm df)
+  (unless (idf--df-setup-for-ivm df)
     (idf-prepare-for-maintenance df))
-  (let ((inputds (car (idf--ds-inputs df)))
+  (let ((inputds (car (idf--df-inputs df)))
         (storesym (idf-mv-store-as-symbol df)))
     (pcase (idf-mv-mvtype df)
       ('hashtable
        (let* ((input (idf-collect inputds))
              (keyfn (idf-mv-keyfn df))
              (valuefn (idf-mv-valuefn df))
-             (cmpfn (idf-mv-cmpfn df))
              (ht (idf--df-result df)))
+         (setf (idf--df-result df) ht)
          (dolist (i input)
-           (ht-set ht (funcall keyfn i) (funcall valuefn i)))))
+           (ht-set ht (funcall keyfn i) (funcall valuefn i)))
+         (when storesym
+           (set storesym ht))))
       ('sortedlist
        (let ((input (idf-collect inputds)))
-         (setf (idf--ds-result df)
+         (setf (idf--df-result df)
                (sorted-list-create input (idf-mv-cmpfn df)))
          (when storesym
-           (set storesym (sorted-list-list (idf--ds-result df)))))))))
+           (set storesym (sorted-list-list (idf--df-result df)))))))))
 
 (cl-defmethod idf-apply-delta ((df idf-mv) (delta list))
   "Apply DELTA to materialized view IDF-MV and return DELTA."
-  (pcase (idf-mv-mvtype df)
-    ('hashtable
-     (let ((ht (idf--df-result df))
-           (keyfn (idf-mv-keyfn df))
-           (valuefn (idf-mv-valuefn df)))
-       (with-delta (car delta)
-         (--each del (ht-remove ht (funcall keyfn it)))
-         (--each ins (ht-set ht (funcall keyfn it) (funcall valuefn it))))
+  (let  ((storesym (idf-mv-store-as-symbol df)))
+    (pcase (idf-mv-mvtype df)
+      ('hashtable
+       (let ((ht (idf--df-result df))
+             (keyfn (idf-mv-keyfn df))
+             (valuefn (idf-mv-valuefn df)))
+         (with-delta (car delta)
+           (--each del (ht-remove ht (funcall keyfn it)))
+           (--each ins (ht-set ht (funcall keyfn it) (funcall valuefn it))))
+         (when storesym
+           (set storesym ht))
          (car delta))) ;;FIXME hashtable behaves all unique so adapt the delta
-    ('sortedlist
-     (let ((sl (idf--df-result df)))
-       (with-delta (car delta)
-         (--each del (sorted-list-delete sl it))
-         (--each ins (sorted-list-insert sl it)))
-       (car delta)))))
+      ('sortedlist
+       (let ((sl (idf--df-result df)))
+         (with-delta (car delta)
+           (--each del (sorted-list-delete sl it))
+           (--each ins (sorted-list-insert sl it)))
+         (when storesym
+           (set storesym (sorted-list-list sl)))
+         (car delta))))))
 
 (defun idf-mv-create-smallerfn (sortkeys &optional types)
-  "Create a function comparing two plists on SORTKEYS whether the first one is smaller than the second one."
+  "Create a function comparing two plists on SORTKEYS.
+
+Return t if the first one is smaller than the second one on
+SORTKEYS. TYPES may be used in the future to determine the right
+smaller-then function for each attribute."
+  (ignore types)
   `(lambda (a b)
     (--all-p (< (plist-get a it) (plist-get b it)) ',sortkeys)))
 
@@ -679,7 +716,7 @@ deleted tuples available as `del'."
     `(lambda (x) t)))
 
 (defun idf-mv-get-result (mv)
-  "Get the materialized result of a materialized view."
+  "Get the materialized result of a materialized view MV."
   (let ((r (idf-mv-result mv)))
     (pcase (idf-mv-mvtype mv)
       ('sortedlist (sorted-list-list r))
@@ -691,7 +728,7 @@ deleted tuples available as `del'."
   "Test whether L may be a plist."
   (if (not (and (listp l) (equal (mod (length l) 2) 0)))
       nil
-    (if (cl-loop for (key value) on l by #'cddr
+    (if (cl-loop for (key _) on l by #'cddr
                    when (not (symbolp key))
                    return t)
         nil
@@ -874,10 +911,14 @@ equality for duplicate elimination."
    :type (idf--df-type df)
    :schema (or schema (idf--df-schema df))
    :inputs `(,df)
-   :keyfn keyextractor))
+   :keyfn (or keyextractor 'identify)))
 
 (cl-defun idf-aggregate (df &key group-by aggs schema)
-  "Group DF on GROUP-BY attributes and then compute aggregation functions AGGS for each group."
+  "Group DF on GROUP-BY attributes.
+
+Then compute aggregation functions AGGS for each group.
+Optionally, the attribute names for the result can be provided as
+parameter SCHEMA."
   (idf--op-aggregate-create
    :type 'plist
    :schema (or schema (idf--agg-create-schema group-by aggs))
