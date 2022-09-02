@@ -7,7 +7,11 @@
 
 # idf
 
-Small library for adding and removing advice to functions.
+Library for incremental dataflows in emacs. This library let's you construct dataflow graphs, i.e., computations on collections that can be evaluated lazily (on demand) and whose results can be materialized. The materialized versions can then be incrementally maintained, i.e., you provide inserts and deletions for the data sources processed by a dataflow graph and `idf` will update the results of the dataflow based on the
+
+## Example
+
+
 
 ## Installation
 
