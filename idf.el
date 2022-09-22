@@ -436,11 +436,13 @@ results for AGGS."
             (idf-delta-create
              :inserted
              (ht-map (lambda (k v)
-                       (idf--merge-schema-and-values schema (append k v)))
+                       (idf--merge-schema-and-values schema
+                                                     (append k (plist-get v :agg))))
                      newgroupvalues)
              :deleted
              (ht-map (lambda (k v)
-                       (idf--merge-schema-and-values schema (append k v)))
+                       (idf--merge-schema-and-values schema
+                                                     (append k (plist-get v :agg))))
                      oldgroupvalues)))
         ;; no group-by
         (let* ((oldagg (idf-op-aggregate-delta-results df))
@@ -491,7 +493,7 @@ results for AGGS."
                (newval (plist-get tuple a))
                (val (car it)))
           (pcase agg
-            ('sum (+ val newval))
+            ('sum (- val newval))
             ('avg (cons (- (car val)  1) (- (cadr val) newval)))
             ('min (avl-tree-delete val newval))
             ('max (avl-tree-delete val newval)))))))
@@ -501,32 +503,41 @@ results for AGGS."
 
 The results should be stored in hashtable HT. We update the
 results by inserting TUPLE."
-  (let* ((groups (--map (plist-get tuple it) groups))
-         (state (ht-get ht groups))
+  (let* ((group (--map (plist-get tuple it) groups))
+         (state (ht-get ht group))
          newstate)
     (if state
-        (unless (ht-contains-p oldgroupvalues groups)
-          (ht-set oldgroupvalues groups state))
-      (setq state (idf--init-delta-agg-results aggs)))
-    (setq newstate (idf--ins-update-agg state aggs tuple))
-    (ht-set ht groups newstate)
-    (ht-set newgroupvalues groups newstate)))
+        (unless (ht-contains-p oldgroupvalues group)
+          (ht-set oldgroupvalues group state))
+      (setq state `(:agg ,(idf--init-delta-agg-results aggs) :count 0)))
+    (setq newstate `(:agg ,(idf--ins-update-agg (plist-get state :agg) aggs tuple)
+                          :count ,(1+ (plist-get state :count))))
+    (ht-set ht group newstate)
+    (ht-set newgroupvalues group newstate)))
 
 (defun idf--maintain-del-group (groups aggs ht oldgroupvalues newgroupvalues tuple)
   "Maintain aggregtion result AGGS for GROUPS.
 
 The results are expceted to be stored in hashtable HT. We
 maintaint the result by deleting TUPLE."
-  (let* ((groups (--map (plist-get tuple it) groups))
-         (state (ht-get ht groups))
+  (let* ((group (--map (plist-get tuple it) groups))
+         (state (ht-get ht group))
+         (cnt (plist-get state :count))
          newstate)
     (unless state
       (error "Something went wrong, tried to delete tuple from a non-existing group"))
-    (unless (ht-contains-p oldgroupvalues groups)
-      (ht-set oldgroupvalues groups state))
-    (setq newstate (idf--del-update-agg state aggs tuple))
-    (ht-set ht groups newstate)
-    (ht-set newgroupvalues groups newstate)))
+    (unless (ht-contains-p oldgroupvalues group)
+      (ht-set oldgroupvalues group state))
+    ;; if last element in the group, then remove the group
+    (if (equal cnt 1)
+        (progn
+          (ht-remove ht group)
+          (ht-remove newgroupvalues group))
+      ;; else update the agg and reduce the count
+      (setq newstate `(:agg ,(idf--del-update-agg (plist-get state :agg) aggs tuple)
+                            :count ,(- cnt 1)))
+    (ht-set ht group newstate)
+    (ht-set newgroupvalues group newstate))))
 
 (defun idf--update-group (groups aggs ht tuple)
   "Update partial aggregation result of TUPLE for AGGS for GROUPS.
@@ -741,7 +752,7 @@ smaller-then function for each attribute."
 
 Either COMPAREFN or SORTKEYS have to be specified to determine
 the sort order for `'sortedlist' views. Optionally, a SCHEMA for
-the result dataframe can be provided."
+the result dataframe can be provided." ;;TODO update doc
   (let ((smallerfn (or comparefn (when sortkeys (idf-mv-create-smallerfn sortkeys))))
         (keyfn (or keyfn (when keyattrs (idf-create-extractor keyattrs))))
         (valuefn (or valuefn (idf-create-extractor valueattrs)))
@@ -760,6 +771,7 @@ the result dataframe can be provided."
     (idf-materialize themv)
     themv))
 
+;;;###autoload
 (defun idf-maintain (df updates)
   "Incrementally maintain materialized dataframe DF based on UPDATES.
 
@@ -783,10 +795,11 @@ sources (`idf-source-fn') , we will call
       (let ((input-updates (--map (idf-maintain it updates) (idf--df-inputs df))))
         (idf-apply-delta df input-updates)))))
 
+;;;###autoload
 (defun idf-maintain-multiple (dfs updates &optional delta-cache)
   "Given list of dataframes DFS, apply UPDATES.
 
-WE incrementally maintain the results for all these dataframes.
+We incrementally maintain the results for all these dataframes.
 Importantly, operators in the dataflow graphs may be shared
 across the dataframes and we take care to only update the result
 of each operator once."
@@ -822,6 +835,7 @@ of each operator once."
 
 ;; ********************************************************************************
 ;; FUNCTIONS - DATAFRAME OPERATIONS
+;;;###autoload
 (cl-defun idf-map (df mapfn &key resultschema type)
   "Create dataframe that maps MAPFN to input DF.
 
@@ -836,13 +850,16 @@ of result. Otherwise, keep schema undecided (nil)."
      :inputs `(,df)
      :map-fn mapfn)))
 
+;;;###autoload
 (cl-defun idf-reduce (df &key reducefn groupfn groupattrs initval type resultschema)
   "Create dataframe DF that applies REDUCEFN to merge input into a single row.
 
 If INITVAL is non-nil, then initialize the result to INITVAL. If
 RESULTSCHEMA is provided then rename attributes accordingly. If
-GROUP-BY is non-nil, then group the rows of the dataframe on
-these columns and apply the reducer to every group."
+GROUPATTRS is non-nil, then group the rows of the dataframe on
+these columns and apply the reducer to every group.
+Alternatively, GROUPFN can be used to determine the key of
+input (inputs with the same key are put into the same group."
   (idf--op-reduce-create
    :reduce-fn reducefn
    :group-fn (or groupfn (idf-create-extractor groupattrs))
@@ -851,9 +868,19 @@ these columns and apply the reducer to every group."
    :schema resultschema
    :inputs `(,df)))
 
+;;;###autoload
 (cl-defun idf-create-source (&key name content generatorfn updatefn schema)
+  "Create a idf source dataframe named NAME.
+
+A source dataframe is either created from some existing CONTENT (a list) or
+using a function that returns the content (GENERATORFN). If a
+source's content changes over time then a UPDATEFN should be
+provided that returns a `idf-delta` which stores which elements
+have been inserted and deleted from the source. Typically idf
+dataframes are lists of lists where the inner lists are alists with
+a fixed SCHEMA that can be provided as an input to this function."
   (when (and (not content) (not generatorfn))
-    (error "sources are either created from literal content or from a generator functions"))
+    (error "Sources are either created from literal content or from a generator functions"))
   (if content
       (idf-source-literal-create
        :name name
@@ -867,10 +894,12 @@ these columns and apply the reducer to every group."
      :generator-fn generatorfn
      :update-fn updatefn)))
 
+;;;###autoload
 (cl-defun idf-project (df &key attrs resultschema)
-  "Project a dataframe DF on ATTRS.
+  "Project a dataframe DF (which has to have a schema) on ATTRS.
 
 if RESULTSCHEMA is provided, then rename attributes like this."
+  ;;TODO check for schema
   (idf--op-map-create
    :schema (or resultschema attrs)
    :inputs `(,df)
@@ -879,6 +908,7 @@ if RESULTSCHEMA is provided, then rename attributes like this."
               (--map (list it (plist-get tuple it))
                      attrs)))))
 
+;;;###autoload
 (cl-defun idf-filter (df &key expr fn)
   "Filter the rows of DF.
 
@@ -886,7 +916,7 @@ If EXPR is provided then generate a function based on the EXPR.
 Any symbol $NAME in EXPR will be replaced with the value of the
 attribute NAME, e.g., `(< $A $B)` would filter out all rows where
 the value of attribute A is smaller than the one of attribute B.
-If FN is provided the evaluate FN on very input row and if it
+If FN is provided the evaluate FN on every input row and if it
 returns nil, then filter out the row."
   (idf--op-filter-create
    :schema (idf--df-schema df)
@@ -895,6 +925,7 @@ returns nil, then filter out the row."
                      fn
                    (idf-expr-to-lambda expr))))
 
+;;;###autoload
 (defun idf-union (leftdf rightdf &optional schema)
   "Union LEFTDF and RIGHTDF."
   (idf--op-union-create
@@ -902,23 +933,38 @@ returns nil, then filter out the row."
    :type (idf--df-type leftdf)
    :inputs `(,leftdf ,rightdf)))
 
+;;;###autoload
 (cl-defun idf-unique (df &key schema keyextractor)
   "Remove duplicates from DF.
 
 If KEYEXTRACTOR is used extract a key from tuples to determine
-equality for duplicate elimination."
+equality for duplicate elimination. If SCHEMA is provided then
+rename the result attributes using SCHEMA."
   (idf--op-unique-create
    :type (idf--df-type df)
    :schema (or schema (idf--df-schema df))
    :inputs `(,df)
    :keyfn (or keyextractor 'identify)))
 
+;;;###autoload
 (cl-defun idf-aggregate (df &key group-by aggs schema)
   "Group DF on GROUP-BY attributes.
 
 Then compute aggregation functions AGGS for each group.
 Optionally, the attribute names for the result can be provided as
-parameter SCHEMA."
+parameter SCHEMA. Essentially, this is a specifialized version of
+`idf-reduce' which uses one of a fixed set of aggregation
+functions. The implementation exploits the properties of the
+aggregation function to improve performance, e.g., for a `sum' we
+can incrementally maintain the sum by updating the current result
+as follows: inserted values are added to the current sum while
+deleted values are subtracted from the current sum.
+
+Currently, the following aggregates are supported:
+- `sum'
+- `avg'
+- `min'
+- `max'"
   (idf--op-aggregate-create
    :type 'plist
    :schema (or schema (idf--agg-create-schema group-by aggs))

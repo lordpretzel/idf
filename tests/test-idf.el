@@ -180,12 +180,18 @@
                 (idf-aggregate :group-by nil :aggs '((sum :a)) :schema '(:x))
                 (idf-materialize-as :viewtype 'sortedlist
                                     :sortkeys '(:x))))
-         (d `(:r ,(idf-delta-create
-                   :inserted '((:a 5 :b 10 :c 5))))))
+         (d1 `(:r ,(idf-delta-create
+                    :inserted '((:a 5 :b 10 :c 5)))))
+         (d2 `(:r ,(idf-delta-create
+                    :deleted '((:a 10 :b 1 :c 10))))))
     (should (equal (idf-delta-create
                     :inserted '((:x 65))
                     :deleted '((:x 60)))
-                   (idf-maintain v d)))))
+                   (idf-maintain v d1)))
+    (should (equal (idf-delta-create
+                    :inserted '((:x 55))
+                    :deleted '((:x 65)))
+                   (idf-maintain v d2)))))
 
 (ert-deftest test-idf-maintain-groupby-aggregate ()
   (let* ((s (idf-create-source :name :r :content '((:a 10 :b 1 :c 10) (:a 20 :b 2 :c 5) (:a 30 :b 1 :c 5))))
@@ -193,13 +199,20 @@
                 (idf-aggregate :group-by '(:c) :aggs '((sum :a)) :schema '(:c :x))
                 (idf-materialize-as :viewtype 'sortedlist
                                     :sortkeys '(:x :c))))
-         (d `(:r ,(idf-delta-create
+         (d1 `(:r ,(idf-delta-create
                    :inserted '((:a 5 :b 10 :c 5)))))
-         (result (idf-maintain v d)))
-    (should (equal result
+         (d2 `(:r ,(idf-delta-create
+                    :deleted '((:a 10 :b 1 :c 10)
+                               (:a 20 :b 2 :c 5))))))
+    (should (equal (idf-maintain v d1)
                    (idf-delta-create
                     :inserted '((:c 5 :x 55))
-                    :deleted '((:c 5 :x 50)))))))
+                    :deleted '((:c 5 :x 50)))))
+    (should (equal (idf-maintain v d2)
+                   (idf-delta-create
+                    :inserted '((:c 5 :x 35))
+                    :deleted '((:c 5 :x 55)
+                               (:c 10 :x 10)))))))
 
 (ert-deftest test-idf-multiple-df-maintenance ()
   "Test incremental maintenance of multiple dataframe that share part of their dataflow graphs."
