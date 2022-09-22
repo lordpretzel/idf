@@ -2,7 +2,7 @@
 <!-- [![GitHub release](https://img.shields.io/github/release/lordpretzel/idf.svg?maxAge=86400)](https://github.com/lordpretzel/idf/releases) -->
 <!-- [![MELPA Stable](http://stable.melpa.org/packages/idf-badge.svg)](http://stable.melpa.org/#/idf) -->
 <!-- [![MELPA](http://melpa.org/packages/idf-badge.svg)](http://melpa.org/#/idf) -->
-[![Build Status](https://secure.travis-ci.org/lordpretzel/idf.png)](http://travis-ci.org/lordpretzel/idf)
+<!-- [![Build Status](https://secure.travis-ci.org/lordpretzel/idf.png)](http://travis-ci.org/lordpretzel/idf) -->
 
 
 # idf
