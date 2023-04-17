@@ -118,6 +118,17 @@ deleted tuples available as `del'."
          (del (idf-delta-deleted ,delta)))
      (progn ,@body)))
 
+(defmacro with-binary-delta (delta &rest body)
+  "Given DELTA for both inputs of a binary op, make inserts / deletes available.
+
+Execute BODY with binding inserts and deletes to `l-ins', `l-del', `r-ins', `r-del'."
+  (declare (indent defun))
+  `(let ((l-ins (idf-delta-inserted (car ,delta)))
+         (l-del (idf-delta-deleted (car ,delta)))
+         (r-ins (idf-delta-inserted (cadr ,delta)))
+         (r-del (idf-delta-deleted (cadr ,delta))))
+     (progn ,@body)))
+
 ;; ********************************************************************************
 ;; DATA STRUCTURES - DATA SOURCES
 
@@ -244,6 +255,7 @@ deleted tuples available as `del'."
    :deleted (append (idf-delta-deleted (car delta))
                      (idf-delta-deleted (cadr delta)))))
 
+
 ;; REDUCE OPERATOR
 ;;TODO implement grouping
 (cl-defstruct (idf-op-reduce
@@ -252,8 +264,8 @@ deleted tuples available as `del'."
   (init-val nil :type plist :documentation "The initial value for the reducer function")
   (reduce-fn 'concat :type function :documentation "The reducer function")
   (group-fn nil :type (list symbol) :documentation "Group input on the result of this function and apply reduce to each group.")
-  (reduce-results nil :type hashtable :documentation "Store for each group the reduce result.")
-  (reduce-inputs nil :type hashtable :documentation "Store inputs each group for reduce to deal with deletes."))
+  (reduce-results nil :type hashtable :documentation "Store for each group of the reduce result.")
+  (reduce-inputs nil :type hashtable :documentation "Store inputs of each group for reduce to deal with deletes."))
 
 (defun idf-ht-value-list-append (ht key value)
   "Append VALUE to the list stored at KEY in hashtable HT."
@@ -630,6 +642,138 @@ hashtable HT."
       :inserted outins
       :deleted outdel))))
 
+;; JOIN OPERATOR
+(cl-defstruct (idf-op-join
+               (:include idf--operator)
+               (:constructor idf--op-join-create))
+  (left-key-extractor nil :type function :documentation  "Function used to extract a key value from the left input")
+  (right-key-extractor nil :type function :documentation "Function used to extract a key value from the right input")
+  (match-fn 'equal :type function :documentation "Function used to decide whether two keys match")
+  (merge-fn 'append :type function :documentation "Function to apply to two input to produced the joined result for these inputs")
+  (left-result nil :documentation "Cache left result")
+  (right-result nil :documentation "Cache right result"))
+
+(defun idf--join-create-schema (left-df right-df)
+  "Generate a schema for a join of LEFT-DF and RIGHT-DF."
+  (let ((left-schema (cl-copy-list (idf--df-schema left-df)))
+        (right-schema (cl-copy-list (idf--df-schema right-df))))
+    (append left-schema right-schema)))
+
+(defun idf--hash-join (ht keyfn other mergefn other-is-right)
+  "Join rows from OTHER with rows in HT.
+
+Apply KEYFN to rows from OTHER to extract join keys. Merge joined
+inputs with MERGEFN. If OTHER-IS-RIGHT then use rows from other
+as the right input to MERGEFN. Otherwise, use them as left input."
+  (apply 'append
+         (--filter it
+                   (--map
+                    (-map (lambda (s)
+                            (if other-is-right
+                                (funcall mergefn s it)
+                              (funcall mergefn it s)))
+                          (ht-get ht (funcall keyfn it)))
+                    other))))
+
+(defun idf--nested-loop-join (left right lkeyfn rkeyfn matchfn mergefn)
+  "Nested loop join LEFT and RIGHT.
+
+Extract keys using LKEYFN and RKEYFN and test matching with MATCHFN.
+Apply MERGEFN to each pair of matching rows."
+  (let (result)
+    (dolist (l left)
+      (dolist (r right)
+        (when (funcall matchfn (funcall lkeyfn l) (funcall rkeyfn r))
+          (push (funcall mergefn l r) 'result))))
+    result))
+
+
+(cl-defmethod idf-collect ((df idf-op-join))
+  "Build left and right input for DF then join them.
+
+If the join condition is an equi-join, then use hash-join, otherwise nested loop."
+  (let* ((left-input (car (idf--df-inputs df)))
+         (right-input (cadr (idf--df-inputs df)))
+         (matchfn (idf-op-join-match-fn df))
+         (mergefn (idf-op-join-merge-fn df))
+         (lkey (idf-op-join-left-key-extractor df))
+         (rkey (idf-op-join-right-key-extractor df)))
+    ;; if equi-join?
+    (if (equal (idf-op-join-match-fn df) 'equal)
+        (let ((right-ht (ht-create 'equal)))
+          ;; build HT
+          (--each (idf-collect right-input)
+            (idf-ht-value-list-append right-ht (funcall rkey it) it))
+          (idf--hash-join right-ht lkey (idf-collect left-input) mergefn nil))
+      ;; non-equi, use nested loop
+      (let ((left-results (idf-collect left-input))
+            (right-results (idf-collect right-input)))
+        (idf--nested-loop-join
+         left-results
+         right-results
+         lkey
+         rkey
+         matchfn
+         mergefn)))))
+
+(cl-defmethod idf-prepare-for-maintenance ((df idf-op-join))
+  (dolist (i (idf--df-inputs df))
+    (idf-prepare-for-maintenance i))
+  (setf (idf--df-setup-for-ivm df) t)
+  (let ((matchfn (idf-op-join-match-fn df)))
+    (if (equal matchfn 'equal)
+        ;; hashjoin
+        (progn
+          (setf (idf-op-join-left-result df) (ht-create 'equal))
+          (setf (idf-op-join-right-result df) (ht-create 'equal)))
+      (setf (idf-op-join-left-result df) nil)
+      (setf (idf-op-join-right-result df) nil))))
+
+(cl-defmethod idf-materialize ((df idf-op-join))
+  (unless (idf--df-setup-for-ivm df)
+    (idf-prepare-for-maintenance df))
+  (setf (idf--df-result df) (idf-collect df)))
+
+(cl-defmethod idf-apply-delta ((df idf-op-join) (deltas list))
+  (unless (idf--df-setup-for-ivm df)
+    (idf-prepare-for-maintenance df))
+  (let ((matchfn (idf-op-join-match-fn df))
+        (mergefn (idf-op-join-merge-fn df))
+        (left-result (idf-op-join-left-result df))
+        (right-result (idf-op-join-right-result df))
+        (lkey (idf-op-join-left-key-extractor df))
+        (rkey (idf-op-join-right-key-extractor df))
+        delta-ins
+        delta-del)
+    ;; DELTA: INSERTED: INS L JOIN R UNION L JOIN INS R UNION INS L JOIN INS R UNION DEL L JOIN DEL R
+    ;;        DELETED: DEL L JOIN R UNION L JOIN DEL R
+    (with-binary-delta deltas
+                       (if (equal matchfn 'equal)
+                           ;; ********************************************************************************
+                           ;; hashjoin
+                           (progn
+                             ;; DELTA L JOIN R
+                             (setq delta-ins (idf--hash-join right-result lkey l-ins mergefn t))
+                             (setq delta-del (idf--hash-join right-result lkey l-del mergefn t))                             ;; L JOIN DELTA R
+                             (setq delta-ins (append delta-ins
+                                                     (idf--hash-join left-result rkey r-ins mergefn nil)))
+                             (setq delta-del (append delta-del
+                                                     (idf--hash-join left-result rkey r-del mergefn nil)))
+                             ;; DELTA L JOIN DELTA R
+                             (setq delta-ins (append delta-ins
+                                                     (idf--nested-loop-join l-ins r-ins lkey rkey matchfn mergefn)))
+                             (setq delta-ins (append delta-ins
+                                                     (idf--nested-loop-join l-del r-del lkey rkey matchfn mergefn))))
+                           ;; ********************************************************************************
+                           ;; nested loop
+                           ;; DELTA L JOIN R
+                           ;; L JOIN DELTA R
+                           ;; DELTA L JOIN DELTA R
+                           ))
+    (idf-delta-create
+     :inserted delta-ins
+     :deleted delta-del)))
+
 ;; ********************************************************************************
 ;; MV
 (cl-defstruct (idf-mv
@@ -955,7 +1099,7 @@ Optionally, the attribute names for the result can be provided as
 parameter SCHEMA. Essentially, this is a specifialized version of
 `idf-reduce' which uses one of a fixed set of aggregation
 functions. The implementation exploits the properties of the
-aggregation function to improve performance, e.g., for a `sum' we
+aggregation functions to improve performance, e.g., for a `sum' we
 can incrementally maintain the sum by updating the current result
 as follows: inserted values are added to the current sum while
 deleted values are subtracted from the current sum.
@@ -971,6 +1115,32 @@ Currently, the following aggregates are supported:
    :group-bys group-by
    :agg-functions aggs
    :inputs `(,df)))
+
+;;;###autoload
+(cl-defun idf-equi-join (left-df right-df &key left-attrs right-attrs schema merge-fn)
+  "Join LEFT-DF with RIGHT-DF on equality in attributes LEFT-ATTRS and RIGHT-ATTRS.
+
+Rename the result attributes using SCHEMA (if provided). If
+MERGE-FN is provided then this function (which has to take two
+arguments) will be applied to every pair of matching elements to
+produce a result element. The default function is to appedn the
+two input elements (plists)."
+  (idf--op-join-create
+   :type 'plist
+   :schema (or schema (idf--join-create-schema left-df right-df))
+   :match-fn 'equal
+   :left-key-extractor (idf--generate-attr-key-extractor left-attrs)
+   :right-key-extractor (idf--generate-attr-key-extractor right-attrs)
+   :merge-fn (or merge-fn 'append) ;; todo rename
+   :inputs `(,left-df ,right-df)))
+
+;; ********************************************************************************
+;; HELPER FUNCTIONS
+(defun idf--generate-attr-key-extractor (attrs)
+  "Generate a lambda that applied a plist returns a sublist with the given keys ATTRS."
+  (let ((fetch-attrs (apply 'append (--map `((plist-get tup ,it)) attrs))))
+    `(lambda (tup)
+       (list ,@fetch-attrs))))
 
 (defun idf-expr-to-lambda (expr)
   "Return a lambda that evaluates EXPR over a tuple (a plist)."

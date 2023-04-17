@@ -1,5 +1,25 @@
 (require 'idf)
 
+
+(ert-deftest test-idf-expr-to-lambda ()
+  "Test translation of expressions with attribute references into lambdas."
+  (let ((tuples '((:a 1 :b 1) (:a 2 :b 2) (:a 2 :b 3)))
+        (expr-f1 (idf-expr-to-lambda '(equal $a $b)))
+        (expected1 '(t t nil))
+        (expr-f2 (idf-expr-to-lambda '(< $a $b)))
+        (expected2 '(nil nil t)))
+    (should (equal expected1 (mapcar expr-f1 tuples)))
+    (should (equal expected2 (mapcar expr-f2 tuples)))))
+
+(ert-deftest test-idf-key-extractors ()
+  (let ((tuples '((:a 1 :b 1) (:a 2 :b 2) (:a 2 :b 3)))
+        (key1 (idf--generate-attr-key-extractor '(:b)))
+        (expected1 '((1) (2) (3)))
+        (key2 (idf--generate-attr-key-extractor '(:b :b)))
+        (expected2 '((1 1) (2 2) (3 3))))
+    (should (equal expected1 (mapcar key1 tuples)))
+    (should (equal expected2 (mapcar key2 tuples)))))
+
 (ert-deftest test-idf-data-sources ()
   "Test data sources."
   (let ((ds '((1 2 3)
@@ -8,6 +28,8 @@
     (dolist (d ds)
       (let ((result (idf-create-source :name "r" :content d)))
         (should (equal d (idf-source-literal-content result)))))))
+
+
 
 (ert-deftest test-idf-project ()
   "Test dataframe projection."
@@ -101,6 +123,23 @@
                (should (equal (idf-collect df)
                                expected))))))
 
+(ert-deftest test-idf-equi-join ()
+  "Test joins."
+  (let* ((sl (idf-create-source :name :r :content '((:a 10 :b 1) (:a 20 :b 1) (:a 30 :b 3))))
+         (sr (idf-create-source :name :s :content '((:c 1 :d 1) (:c 1 :d 2) (:c 20 :d 1))))
+         (j (idf-equi-join sl sr
+                           :left-attrs '(:b)
+                           :right-attrs '(:c)))
+         (mv (idf-materialize-as
+              j
+              :viewtype 'sortedlist
+              :sortkeys '(:a :b :d)))
+         (expected '((:a 10 :b 1 :c 1 :d 2)
+                     (:a 10 :b 1 :c 1 :d 1)
+                     (:a 20 :b 1 :c 1 :d 2)
+                     (:a 20 :b 1 :c 1 :d 1))))
+    (should (equal (idf-mv-get-result mv)
+                   expected))))
 
 (ert-deftest test-idf-materialization-sorted-list ()
   "Test materialization."
@@ -213,6 +252,42 @@
                     :inserted '((:c 5 :x 35))
                     :deleted '((:c 5 :x 55)
                                (:c 10 :x 10)))))))
+
+(ert-deftest test-idf-maintain-equi-join ()
+  "Test joins."
+  (let* ((sl (idf-create-source :name :r :content '((:a 10 :b 1) (:a 20 :b 1) (:a 30 :b 3))))
+         (sr (idf-create-source :name :s :content '((:c 1 :d 1) (:c 1 :d 2) (:c 20 :d 1))))
+         (j (idf-equi-join sl sr
+                           :left-attrs '(:b)
+                           :right-attrs '(:c)))
+         (mv (idf-materialize-as
+              j
+              :viewtype 'sortedlist
+              :sortkeys '(:a :b :d)))
+         (d1 `(:r ,(idf-delta-create
+                    :inserted '((:a 40 :b 1))
+                    :deleted '((:a 20 :b 1)))
+                  :s ,(idf-delta-create
+                       :inserted '((:c 3 :d 55)))))
+         (d2 `(:s ,(idf-delta-create
+                       :deleted '((:c 3 :d 55)))))
+         (expected1 (idf-delta-create
+                     :inserted '((:a 40 :b 1 :c 1 :d 1)
+                                 (:a 40 :b 1 :c 1 :d 2)
+                                 (:a 30 :b 3 :c 3 :d 55))
+                     :deleted '((:a 20 :b 1 :c 1 :d 2)
+                                (:a 20 :b 1 :c 1 :d 1))))
+         (expected2 (idf-delta-create
+                     :deleted '((:a 30 :b 3 :c 3 :d 55)))))
+         ;; (expected '((:a 10 :b 1 :c 1 :d 2)
+         ;;             (:a 10 :b 1 :c 1 :d 1)
+         ;;             (:a 20 :b 1 :c 1 :d 2)
+         ;;             (:a 20 :b 1 :c 1 :d 1))))
+    (should (equal (idf-maintain mv d1)
+                   expected1))
+    (should (equal (idf-maintain mv d2)
+                   expected2))))
+
 
 (ert-deftest test-idf-multiple-df-maintenance ()
   "Test incremental maintenance of multiple dataframe that share part of their dataflow graphs."
