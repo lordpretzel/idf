@@ -29,8 +29,6 @@
       (let ((result (idf-create-source :name "r" :content d)))
         (should (equal d (idf-source-literal-content result)))))))
 
-
-
 (ert-deftest test-idf-project ()
   "Test dataframe projection."
   (let ((inout '(;; project a
@@ -138,6 +136,25 @@
                      (:a 10 :b 1 :c 1 :d 1)
                      (:a 20 :b 1 :c 1 :d 2)
                      (:a 20 :b 1 :c 1 :d 1))))
+    (should (equal (idf-mv-get-result mv)
+                   expected))))
+
+(ert-deftest test-idf-equi-left-join ()
+  "Test joins."
+  (let* ((sl (idf-create-source :name :r :content '((:a 10 :b 1) (:a 20 :b 1) (:a 30 :b 3))))
+         (sr (idf-create-source :name :s :content '((:c 1 :d 1) (:c 1 :d 2) (:c 20 :d 1))))
+         (j (idf-left-equi-join sl sr
+                           :left-attrs '(:b)
+                           :right-attrs '(:c)))
+         (mv (idf-materialize-as
+              j
+              :viewtype 'sortedlist
+              :sortkeys '(:a :b :d)))
+         (expected '((:a 10 :b 1 :c 1 :d 2)
+                     (:a 10 :b 1 :c 1 :d 1)
+                     (:a 20 :b 1 :c 1 :d 2)
+                     (:a 20 :b 1 :c 1 :d 1)
+                     (:a 30 :b 3 :c nil :d nil))))
     (should (equal (idf-mv-get-result mv)
                    expected))))
 

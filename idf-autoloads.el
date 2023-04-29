@@ -99,7 +99,7 @@ Optionally, the attribute names for the result can be provided as
 parameter SCHEMA. Essentially, this is a specifialized version of
 `idf-reduce' which uses one of a fixed set of aggregation
 functions. The implementation exploits the properties of the
-aggregation function to improve performance, e.g., for a `sum' we
+aggregation functions to improve performance, e.g., for a `sum' we
 can incrementally maintain the sum by updating the current result
 as follows: inserted values are added to the current sum while
 deleted values are subtracted from the current sum.
@@ -111,7 +111,20 @@ Currently, the following aggregates are supported:
 - `max'
 
 (fn DF &key GROUP-BY AGGS SCHEMA)")
-(register-definition-prefixes "idf" '("idf-" "with-delta"))
+(autoload 'idf-equi-join "idf" "\
+Join LEFT-DF with RIGHT-DF on equality.
+
+Attributes LEFT-ATTRS and RIGHT-ATTRS and the attributes from
+LEFT-DF (RIGHT_DF) we are joining on. Rename the result
+attributes using SCHEMA (if provided). If MERGE-FN is provided
+then this function (which has to take two arguments) will be
+applied to every pair of matching elements to produce a result
+element. The default function is to appedn the two input
+elements (plists). If JOIN-TYPE is provided, then use this join
+type (`inner', `left-outer', `right-outer', and `'full-outer'.
+
+(fn LEFT-DF RIGHT-DF &key LEFT-ATTRS RIGHT-ATTRS SCHEMA MERGE-FN JOIN-TYPE)")
+(register-definition-prefixes "idf" '("idf-" "with-"))
 
 
 ;;; End of scraped data
