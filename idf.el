@@ -798,7 +798,7 @@ otherwise nested loop."
            )
       ;; non-equi, use nested loop
       (let ((left-results (idf-collect left-input))
-            (right-results (idf-collect right-input)))
+            (right-results (idf-collect right-input))) ;;TODO outer joins
         (idf--nested-loop-join
          left-results
          right-results

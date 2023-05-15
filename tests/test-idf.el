@@ -140,7 +140,7 @@
                    expected))))
 
 (ert-deftest test-idf-equi-left-join ()
-  "Test joins."
+  "Test left outer join."
   (let* ((sl (idf-create-source :name :r :content '((:a 10 :b 1) (:a 20 :b 1) (:a 30 :b 3))))
          (sr (idf-create-source :name :s :content '((:c 1 :d 1) (:c 1 :d 2) (:c 20 :d 1))))
          (j (idf-left-equi-join sl sr
@@ -158,19 +158,49 @@
     (should (equal (idf-mv-get-result mv)
                    expected))))
 
+(ert-deftest test-idf-equi-right-join ()
+  "Test right out join."
+  (let* ((sl (idf-create-source :name :r :content '((:a 10 :b 1) (:a 20 :b 1) (:a 30 :b 3))))
+         (sr (idf-create-source :name :s :content '((:c 1 :d 1) (:c 1 :d 2) (:c 20 :d 1))))
+         (j (idf-right-equi-join sl sr
+                           :left-attrs '(:b)
+                           :right-attrs '(:c)))
+         (mv (idf-materialize-as
+              j
+              :viewtype 'sortedlist
+              :sortkeys '(:a :b :c :d)))
+         (expected '((:a 10 :b 1 :c 1 :d 2)
+                     (:a 10 :b 1 :c 1 :d 1)
+                     (:a 20 :b 1 :c 1 :d 2)
+                     (:a 20 :b 1 :c 1 :d 1)
+                     (:a nil :b nil :c 20 :d 1))))
+    (should (equal (idf-mv-get-result mv)
+                   expected))))
+
+
 (ert-deftest test-idf-materialization-sorted-list ()
   "Test materialization."
   (let* ((s (idf-create-source :name :r :content '((:a 10 :b 1) (:a 20 :b 2) (:a 30 :b 1))))
+         (uns (idf-create-source :name :unr :content '((:a 30 :b 1) (:a 20 :b 2) (:a 20 :b 1))))
          (v1 (-> s
                  (idf-project :attrs '(:a))
                  (idf-materialize-as :viewtype 'sortedlist :sortkeys '(:a))))
          (v2 (-> s
                  (idf-filter :expr '(equal $a 10))
-                 (idf-materialize-as :viewtype 'sortedlist :sortkeys '(:a :b)))))
+                 (idf-materialize-as :viewtype 'sortedlist :sortkeys '(:a :b))))
+         (v3 (-> uns
+                 (idf-materialize-as :viewtype 'sortedlist :sortkeys '(:a :b))))
+         (v4 (-> uns
+                 (idf-materialize-as :viewtype 'sortedlist :sortkeys '(:b :a)))))
     (should (equal '((:a 10) (:a 20) (:a 30))
                    (idf-mv-get-result v1)))
     (should (equal '((:a 10 :b 1))
-                   (idf-mv-get-result v2)))))
+                   (idf-mv-get-result v2)))
+    (should (equal '((:a 20 :b 1) (:a 20 :b 2) (:a 30 :b 1))
+                   (idf-mv-get-result v2)))
+    (should (equal '((:a 20 :b 1) (:a 30 :b 1) (:a 20 :b 2))
+                   (idf-mv-get-result v2)))
+    ))
 
 (ert-deftest test-idf-materialization-hashtable ()
   "Test materialization."
