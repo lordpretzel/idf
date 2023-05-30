@@ -132,10 +132,10 @@
               j
               :viewtype 'sortedlist
               :sortkeys '(:a :b :d)))
-         (expected '((:a 10 :b 1 :c 1 :d 2)
-                     (:a 10 :b 1 :c 1 :d 1)
-                     (:a 20 :b 1 :c 1 :d 2)
-                     (:a 20 :b 1 :c 1 :d 1))))
+         (expected '((:a 10 :b 1 :c 1 :d 1)
+                     (:a 10 :b 1 :c 1 :d 2)
+                     (:a 20 :b 1 :c 1 :d 1)
+                     (:a 20 :b 1 :c 1 :d 2))))
     (should (equal (idf-mv-get-result mv)
                    expected))))
 
@@ -150,10 +150,10 @@
               j
               :viewtype 'sortedlist
               :sortkeys '(:a :b :d)))
-         (expected '((:a 10 :b 1 :c 1 :d 2)
-                     (:a 10 :b 1 :c 1 :d 1)
-                     (:a 20 :b 1 :c 1 :d 2)
+         (expected '((:a 10 :b 1 :c 1 :d 1)
+                     (:a 10 :b 1 :c 1 :d 2)
                      (:a 20 :b 1 :c 1 :d 1)
+                     (:a 20 :b 1 :c 1 :d 2)
                      (:a 30 :b 3 :c nil :d nil))))
     (should (equal (idf-mv-get-result mv)
                    expected))))
@@ -169,14 +169,42 @@
               j
               :viewtype 'sortedlist
               :sortkeys '(:a :b :c :d)))
-         (expected '((:a 10 :b 1 :c 1 :d 2)
-                     (:a 10 :b 1 :c 1 :d 1)
-                     (:a 20 :b 1 :c 1 :d 2)
+         (expected '((:a 10 :b 1 :c 1 :d 1)
+                     (:a 10 :b 1 :c 1 :d 2)
                      (:a 20 :b 1 :c 1 :d 1)
+                     (:a 20 :b 1 :c 1 :d 2)                     
                      (:a nil :b nil :c 20 :d 1))))
     (should (equal (idf-mv-get-result mv)
                    expected))))
 
+(ert-deftest test-idf-sort-functions ()
+  (let* ((pairs '((:a 10 :b 1 :c 1 :d 1) (:a 10 :b 1 :c 1 :d 2)
+                  (:a 10 :b 1 :c 1 :d 1) (:a 20 :b 1 :c 1 :d 2)
+                  (:a 20 :b 1 :c 1 :d 1) (:a 20 :b 1 :c 1 :d 2)
+                  (:a 10 :b 1 :c 1 :d 1) (:a 30 :b 3 :c nil :d nil)
+                  ))
+         (notpairs '((:a 30 :b 3 :c nil :d nil) (:a 20 :b 1 :c 1 :d 2)
+                     (:a 20 :b 1 :c 1 :d 2) (:a 20 :b 1 :c 1 :d 1)
+                     (:a 10 :b 1 :c 1 :d 2) (:a 10 :b 1 :c 1 :d 1)
+                     (:a 20 :b 1 :c 1 :d 1) (:a 10 :b 1 :c 1 :d 1)
+                     ))
+         (sf1 (idf-mv-create-smallerfn '(:a :b :d)))
+         (pairs2 '((:a 20 :b 1) (:a 30 :b 1)
+                   (:a 30 :b 1) (:a 20 :b 2)
+                   (:a 20 :b 1) (:a 20 :b 2)))
+         (notpairs2 '((:a 30 :b 1) (:a 20 :b 1)
+                      (:a 20 :b 2) (:a 30 :b 1) 
+                      (:a 20 :b 2) (:a 20 :b 1)))
+         (sf2 (idf-mv-create-smallerfn '(:b :a)))
+         (alltests '(pairs notpairs pairs2 notpairs2)))
+    (cl-loop for (p np) on alltests by 'cddr
+             do
+             (cl-loop for (key value) on p by 'cddr
+                      do
+                      (should (funcall sf1 key value)))
+             (cl-loop for (key value) on np by 'cddr
+                      do
+                      (should (not (funcall sf1 key value)))))))
 
 (ert-deftest test-idf-materialization-sorted-list ()
   "Test materialization."
@@ -197,10 +225,9 @@
     (should (equal '((:a 10 :b 1))
                    (idf-mv-get-result v2)))
     (should (equal '((:a 20 :b 1) (:a 20 :b 2) (:a 30 :b 1))
-                   (idf-mv-get-result v2)))
+                   (idf-mv-get-result v3)))
     (should (equal '((:a 20 :b 1) (:a 30 :b 1) (:a 20 :b 2))
-                   (idf-mv-get-result v2)))
-    ))
+                   (idf-mv-get-result v4)))))
 
 (ert-deftest test-idf-materialization-hashtable ()
   "Test materialization."
@@ -319,17 +346,19 @@
          (d2 `(:s ,(idf-delta-create
                        :deleted '((:c 3 :d 55)))))
          (expected1 (idf-delta-create
-                     :inserted '((:a 40 :b 1 :c 1 :d 1)
-                                 (:a 40 :b 1 :c 1 :d 2)
-                                 (:a 30 :b 3 :c 3 :d 55))
-                     :deleted '((:a 20 :b 1 :c 1 :d 2)
-                                (:a 20 :b 1 :c 1 :d 1))))
+                     :inserted '((:a 30 :b 3 :c 3 :d 55)
+                                 (:a 40 :b 1 :c 1 :d 1)
+                                 (:a 40 :b 1 :c 1 :d 2))
+                     :deleted '((:a 20 :b 1 :c 1 :d 1)
+                                (:a 20 :b 1 :c 1 :d 2))))
          (expected2 (idf-delta-create
                      :deleted '((:a 30 :b 3 :c 3 :d 55)))))
          ;; (expected '((:a 10 :b 1 :c 1 :d 2)
          ;;             (:a 10 :b 1 :c 1 :d 1)
          ;;             (:a 20 :b 1 :c 1 :d 2)
-         ;;             (:a 20 :b 1 :c 1 :d 1))))
+    ;;             (:a 20 :b 1 :c 1 :d 1))))
+    (message "expected1 %s" expected1)
+    (message "waht we got: %s\n" (idf-maintain mv d1))
     (should (equal (idf-maintain mv d1)
                    expected1))
     (should (equal (idf-maintain mv d2)

@@ -879,7 +879,7 @@ otherwise nested loop."
   (mvtype 'hashtable :type symbol :documentation "Data structure to use to store the materialized view.
 
 Should be either `hashtable' or sorted `list'")
-  (cmpfn nil :type symbol :documentation "Use this function as the small-then function for sorted lists.
+  (cmpfn nil :type symbol :documentation "Use this function as the smaller-then function for sorted lists.
 
 For hashtables this is the hash test (created with
 `define-hash-table-test'")
@@ -957,13 +957,19 @@ SORTKEYS. TYPES may be used in the future to determine the right
 smaller-then function for each attribute."
   (ignore types)
   `(lambda (a b)
-     (--all-p (let ((av (plist-get a it))
-                    (bv (plist-get b it)))
-                (or
-                 (and av (not bv))
-                 (and av bv
-                      (< (plist-get a it) (plist-get b it)))))
-                 ',sortkeys)))
+     (equal
+      (--first it
+               (--map (let ((av (plist-get a it)) (bv (plist-get b it)))
+                        (cond
+                         ;; equal -> nil
+                         ((equal av bv) nil)
+                         ;; smaller -> -1
+                         ((or (and av (not bv)) (and av bv (< (plist-get a it) (plist-get b it))))
+                          -1)
+                         ;; larger 1
+                         (t 1)))
+                      ',sortkeys))
+      -1)))
 
 (defun idf-create-extractor (attrs)
   "Create a function that projects tuples on ATTRS."
