@@ -964,7 +964,7 @@ smaller-then function for each attribute."
                          ;; equal -> nil
                          ((equal av bv) nil)
                          ;; smaller -> -1
-                         ((or (and av (not bv)) (and av bv (< (plist-get a it) (plist-get b it))))
+                         ((or (and av (not bv)) (and av bv (< av bv)))
                           -1)
                          ;; larger 1
                          (t 1)))

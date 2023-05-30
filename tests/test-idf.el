@@ -210,6 +210,7 @@
   "Test materialization."
   (let* ((s (idf-create-source :name :r :content '((:a 10 :b 1) (:a 20 :b 2) (:a 30 :b 1))))
          (uns (idf-create-source :name :unr :content '((:a 30 :b 1) (:a 20 :b 2) (:a 20 :b 1))))
+         (uns2 (idf-create-source :name :unr :content '((:a 30 :b 1) (:a 20 :b 2) (:a 20 :b 1))))
          (v1 (-> s
                  (idf-project :attrs '(:a))
                  (idf-materialize-as :viewtype 'sortedlist :sortkeys '(:a))))
@@ -218,7 +219,7 @@
                  (idf-materialize-as :viewtype 'sortedlist :sortkeys '(:a :b))))
          (v3 (-> uns
                  (idf-materialize-as :viewtype 'sortedlist :sortkeys '(:a :b))))
-         (v4 (-> uns
+         (v4 (-> uns2
                  (idf-materialize-as :viewtype 'sortedlist :sortkeys '(:b :a)))))
     (should (equal '((:a 10) (:a 20) (:a 30))
                    (idf-mv-get-result v1)))
