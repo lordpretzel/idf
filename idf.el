@@ -811,23 +811,50 @@ otherwise nested loop."
   (dolist (i (idf--df-inputs df))
     (idf-prepare-for-maintenance i))
   (setf (idf--df-setup-for-ivm df) t)
-  (let ((matchfn (idf-op-join-match-fn df)))
+  (let* ((lresult (idf-collect (car (idf--df-inputs df))))
+         (rresult (idf-collect (cadr (idf--df-inputs df))))
+         (result (idf-collect df))
+         (matchfn (idf-op-join-match-fn df))
+         (lkey (idf-op-join-left-key-extractor df))
+         (rkey (idf-op-join-right-key-extractor df))
+         (lht (ht-create 'equal))
+         (rht (ht-create 'equal)))
+    (setf (idf--df-result df) result)
     (if (equal matchfn 'equal)
         ;; hashjoin
         (progn
-          (setf (idf-op-join-left-result df) (ht-create 'equal))
-          (setf (idf-op-join-right-result df) (ht-create 'equal)))
-      (setf (idf-op-join-left-result df) nil)
-      (setf (idf-op-join-right-result df) nil))))
+          (dolist (r lresult)
+            (idf-ht-value-list-append lht (funcall lkey r) r))
+          (dolist (r rresult)
+            (idf-ht-value-list-append rht (funcall rkey r) r)))
+      (error "Not implemented yet"))
+  (setf (idf-op-join-left-result df) lht)
+  (setf (idf-op-join-right-result df) rht)))
 
 (cl-defmethod idf-materialize ((df idf-op-join))
   (unless (idf--df-setup-for-ivm df)
     (idf-prepare-for-maintenance df))
-  (setf (idf--df-result df) (idf-collect df)))
+  (let* ((lresult (idf-collect (car (idf--df-inputs df))))
+         (rresult (idf-collect (cadr (idf--df-inputs df))))
+         (result (idf-collect df))
+         (matchfn (idf-op-join-match-fn df))
+         (lkey (idf-op-join-left-key-extractor df))
+         (rkey (idf-op-join-right-key-extractor df))
+         (lht (idf-op-join-left-result df))
+         (rht (idf-op-join-right-result df)))
+    (setf (idf--df-result df) result)
+    (if (equal matchfn 'equal)
+        ;; hashjoin
+        (progn
+          (dolist (r lresult)
+            (idf-ht-value-list-append lht (funcall lkey r) r))
+          (dolist (r rresult)
+            (idf-ht-value-list-append rht (funcall rkey r) r)))
+      (error "Not implemented yet"))))
 
 (cl-defmethod idf-apply-delta ((df idf-op-join) (deltas list))
   (unless (idf--df-setup-for-ivm df)
-    (idf-prepare-for-maintenance df))
+    (idf-pr>epare-for-maintenance df))
   (let ((matchfn (idf-op-join-match-fn df))
         (mergefn (idf-op-join-merge-fn df))
         (left-result (idf-op-join-left-result df))
@@ -844,13 +871,13 @@ otherwise nested loop."
                            ;; hashjoin
                            (progn
                              ;; DELTA L JOIN R
-                             (setq delta-ins (idf--hash-join right-result lkey l-ins mergefn t))
-                             (setq delta-del (idf--hash-join right-result lkey l-del mergefn t))
+                             (setq delta-ins (idf--hash-join right-result lkey l-ins mergefn nil))
+                             (setq delta-del (idf--hash-join right-result lkey l-del mergefn nil))
                              ;; L JOIN DELTA R
                              (setq delta-ins (append delta-ins
-                                                     (idf--hash-join left-result rkey r-ins mergefn nil)))
+                                                     (idf--hash-join left-result rkey r-ins mergefn t)))
                              (setq delta-del (append delta-del
-                                                     (idf--hash-join left-result rkey r-del mergefn nil)))
+                                                     (idf--hash-join left-result rkey r-del mergefn t)))
                              ;; DELTA L JOIN DELTA R
                              (setq delta-ins (append delta-ins
                                                      (idf--nested-loop-join l-ins r-ins lkey rkey matchfn mergefn)))
@@ -1180,7 +1207,9 @@ returns nil, then filter out the row."
 
 ;;;###autoload
 (defun idf-union (leftdf rightdf &optional schema)
-  "Union LEFTDF and RIGHTDF."
+  "Union LEFTDF and RIGHTDF.
+
+Optionally rename attributes to match SCHEMA."
   (idf--op-union-create
    :schema (or schema (idf--df-schema leftdf))
    :type (idf--df-type leftdf)
@@ -1307,12 +1336,12 @@ elements (plists)."
        (list ,@fetch-attrs))))
 
 (defun idf-expr-to-lambda (expr)
-  "Return a lambda that evaluates EXPR over a tuple (a plist)."
+  "Return a lambda to evaluate EXPR over a tuple (a plist)."
   `(lambda (tup)
      ,(idf--expr-to-code expr)))
 
 (defun idf--expr-to-code (expr)
-  "Construct list code from EXPR.
+  "Construct Lisp code from EXPR.
 
 Currently, the only thing we do is to replace symbols $NAME with
 code that extracts the attribute NAME from an input tuple."
