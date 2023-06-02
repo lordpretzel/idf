@@ -354,8 +354,6 @@
                                 (:a 20 :b 1 :c 1 :d 1))))
          (expected2 (idf-delta-create
                      :deleted '((:a 30 :b 3 :c 3 :d 55)))))
-    (message "expected1 %s" expected1)
-;;    (message "what we got: %s\n" (idf-maintain mv d1))
     (should (equal (idf-maintain mv d1)
                    expected1))
     (should (equal (idf-maintain mv d2)
